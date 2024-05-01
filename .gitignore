@@ -5,10 +5,12 @@
 *.mp4
 *.txt
 *.pcm
+*.avi
 data/
 tests/
 exps/
-demo/*
+/demo/*
+.cog
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
