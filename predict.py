@@ -10,7 +10,7 @@ from cog import BasePredictor, BaseModel, Input, Path
 
 
 class Output(BaseModel):
-    media_path: Optional[Path]
+    media_path: Optional[List[Path]]
     json_str: Optional[str]
 
 
@@ -45,6 +45,13 @@ class Predictor(BasePredictor):
         duration: int = Input(
             default=-1,
             description="The duration of the video, when set as -1, will extract the whole video",
+        ),
+        return_json: bool = Input(
+            description="Return results in json format", default=True
+        ),
+        return_boundingbox_percentages: bool = Input(
+            description="Return bounding box coordinates as percentages of the video width and height",
+            default=False,
         ),
     ) -> Output:
 
@@ -107,29 +114,88 @@ class Predictor(BasePredictor):
         # Convert face tracks and scores to the desired JSON format
         output_data = []
         for track_idx, track in enumerate(face_tracks):
+            # Get the frame numbers for the current track
             frames = track["track"]["frame"]
+
+            # Get the bounding box information for the current track
             boxes = track["proc_track"]
+
+            # Get the speaking scores for the current track
+            # If the track index is out of range, use an empty list
             speaking_scores = scores[track_idx] if track_idx < len(scores) else []
+
             for i, frame in enumerate(frames):
+                # Check if the current index is within the valid range of the bounding box information
+                # If not, break the loop and move to the next track
                 if i >= len(boxes["x"]) or i >= len(boxes["y"]) or i >= len(boxes["s"]):
                     break
-                # Normalize the bounding box coordinates to percentages
+
+                # Calculate bounding box coordinates
+                x0 = int(boxes["x"][i] - boxes["s"][i])
+                y0 = int(boxes["y"][i] - boxes["s"][i])
+                x1 = int(boxes["x"][i] + boxes["s"][i])
+                y1 = int(boxes["y"][i] + boxes["s"][i])
+
+                # Normalize the bounding box coordinates if required
+                if return_boundingbox_percentages:
+                    x0 /= video_width
+                    y0 /= video_height
+                    x1 /= video_width
+                    y1 /= video_height
+
+                # Determine speaking status
+                speaking = (
+                    bool(speaking_scores[i] >= 0) if i < len(speaking_scores) else False
+                )
+
+                # Create the bounding box dictionary
                 box = {
                     "face_id": track_idx,
-                    "x0": boxes["x"][i] / video_width,
-                    "y0": boxes["y"][i] / video_height,
-                    "x1": (boxes["x"][i] + boxes["s"][i]) / video_width,
-                    "y1": (boxes["y"][i] + boxes["s"][i]) / video_height,
-                    "speaking": bool(speaking_scores[i] >= 0) if i < len(speaking_scores) else False
+                    "x0": x0,
+                    "y0": y0,
+                    "x1": x1,
+                    "y1": y1,
+                    "speaking": speaking,
                 }
-                # Create a dictionary for each frame
-                frame_data = next((data for data in output_data if data["frame_number"] == int(frame)), None)
+
+                # Create a dictionary for each frame if it doesn't exist
+                frame_data = next(
+                    (
+                        data
+                        for data in output_data
+                        if data["frame_number"] == int(frame)
+                    ),
+                    None,
+                )
                 if frame_data is None:
                     frame_data = {"frame_number": int(frame), "faces": []}
                     output_data.append(frame_data)
+
+                # Add the current face's bounding box and speaking status to the frame's data
                 frame_data["faces"].append(box)
 
         # Convert the output data to JSON string
         json_str = json.dumps(output_data)
 
-        return Output(json_str=json_str)
+        if return_json:
+            return Output(json_str=json_str)
+        else:
+            mp4_files = []
+            excluded_files = ["video_only.avi", "video.avi"]
+            avi_files = [
+                avi_file
+                for avi_file in Path(video_folder).rglob("*.avi")
+                if avi_file.name not in excluded_files
+            ]
+            for avi_file in avi_files:
+                mp4_file = avi_file.with_suffix(".mp4")
+                conversion_command = f"ffmpeg -i {avi_file} {mp4_file}"
+                conversion_process = subprocess.run(
+                    conversion_command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if conversion_process.returncode == 0:
+                    mp4_files.append(Path(mp4_file))
+            return Output(media_path=mp4_files)
